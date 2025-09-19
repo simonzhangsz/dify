@@ -125,8 +125,8 @@ class Node:
 
         from typing import cast
 
-        from core.workflow.nodes.agent.agent_node import AgentNode
-        from core.workflow.nodes.agent.entities import AgentNodeData
+        from core.workflow.nodes.agent.v1.agent_node import AgentNode
+        from core.workflow.nodes.agent.v1.entities import AgentNodeData
 
         if isinstance(self, AgentNode):
             start_event.agent_strategy = AgentNodeStrategyInit(
