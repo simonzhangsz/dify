@@ -7,7 +7,7 @@ from core.workflow.graph import NodeFactory
 from core.workflow.nodes.base.node import Node
 from libs.typing import is_str, is_str_dict
 
-from .node_mapping import LATEST_VERSION, NODE_TYPE_CLASSES_MAPPING
+from .node_mapping import NODE_TYPE_CLASSES_MAPPING
 
 if TYPE_CHECKING:
     from core.workflow.entities import GraphInitParams, GraphRuntimeState
@@ -62,8 +62,9 @@ class DifyNodeFactory(NodeFactory):
         node_mapping = NODE_TYPE_CLASSES_MAPPING.get(node_type)
         if not node_mapping:
             raise ValueError(f"No class mapping found for node type: {node_type}")
-
-        node_class = node_mapping.get(LATEST_VERSION)
+        # temp change to 1
+        node_version = node_data.get("version", "1")
+        node_class = node_mapping.get(node_version)
         if not node_class:
             raise ValueError(f"No latest version class found for node type: {node_type}")
 

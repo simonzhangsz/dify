@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 from core.workflow.enums import NodeType
 from core.workflow.nodes.agent.v1 import AgentNode as AgentNodeV1
-from core.workflow.nodes.agent.v2 import AgentV2Node as AgentNodeV2
+from core.workflow.nodes.agent.v2 import AgentNode as AgentNodeV2
 from core.workflow.nodes.answer.answer_node import AnswerNode
 from core.workflow.nodes.base.node import Node
 from core.workflow.nodes.code import CodeNode
