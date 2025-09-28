@@ -165,3 +165,14 @@ class AgentLog(BaseModel):
     status: LogStatus = Field(..., description="The status of the log")
     data: Mapping[str, Any] = Field(..., description="Detailed log data")
     metadata: Mapping[LogMetadata, Any] = Field(default={}, description="The metadata of the log")
+
+
+class AgentResult(BaseModel):
+    """
+    Agent execution result.
+    """
+
+    text: str = Field(default="", description="The generated text")
+    files: list[Any] = Field(default_factory=list, description="Files produced during execution")
+    usage: Any | None = Field(default=None, description="LLM usage statistics")
+    finish_reason: str | None = Field(default=None, description="Reason for completion")

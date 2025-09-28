@@ -4,8 +4,9 @@ import logging
 from collections.abc import Generator, Mapping, Sequence
 from typing import Any
 
-from core.agent.entities import AgentLog, AgentToolEntity, ExecutionContext
+from core.agent.entities import AgentLog, AgentResult, AgentToolEntity, ExecutionContext
 from core.agent.patterns import StrategyFactory
+from core.agent.tools.manager import AgentBuiltinToolsManager
 from core.file import File, file_manager
 from core.model_manager import ModelInstance, ModelManager
 from core.model_runtime.entities import (
@@ -116,11 +117,11 @@ class AgentNode(Node):
                         max_token_limit=self._node_data.memory.window.size or 2000
                     )
 
-            # Fetch files if vision is enabled
-            files = self._fetch_files(variable_pool) if self._node_data.vision.enabled else []
+            # Fetch vision files (these go directly to model)
+            vision_files = self._fetch_vision_files(variable_pool) if self._node_data.vision.enabled else []
 
-            # Get prompt messages with files
-            prompt_messages = self._prepare_prompt_messages(variable_pool, files, history_prompt)
+            # Prepare prompt messages and extract prompt files
+            prompt_messages, prompt_files = self._prepare_prompt_messages(variable_pool, vision_files, history_prompt)
 
             # Use factory to create appropriate strategy
             strategy = StrategyFactory.create_strategy(
@@ -131,6 +132,19 @@ class AgentNode(Node):
                 # TODO conversation_id and message_id
                 context=ExecutionContext(user_id=self.user_id, app_id=self.app_id, tenant_id=self.tenant_id),
             )
+
+            # Add file dispatcher if prompt files exist
+            if prompt_files:
+
+                def on_file_for_model(file: File):
+                    strategy.files.append(file)
+
+                file_dispatcher = AgentBuiltinToolsManager.create_file_dispatcher(
+                    prompt_files, on_file_for_model=on_file_for_model
+                )
+                if file_dispatcher:
+                    # Add file dispatcher to strategy's tools
+                    strategy.tools = list(strategy.tools) + [file_dispatcher]
 
             # Run strategy
             outputs = strategy.run(
@@ -180,42 +194,39 @@ class AgentNode(Node):
 
     def _prepare_tool_instances(self, variable_pool: VariablePool) -> list[Tool]:
         """Prepare tool instances from configuration."""
-        if not self._node_data.tools:
-            return []
-
         tool_instances = []
 
-        for tool_selector in self._node_data.tools:
-            try:
-                # Create AgentToolEntity from tool selector
-                from core.tools.entities.tool_entities import ToolProviderType
+        # Add configured tools
+        if self._node_data.tools:
+            for tool in self._node_data.tools:
+                try:
+                    # Create AgentToolEntity from ToolMetadata
+                    agent_tool = AgentToolEntity(
+                        provider_id=tool.provider_name,
+                        provider_type=tool.type,
+                        tool_name=tool.tool_name,
+                        tool_parameters=tool.parameters,
+                        plugin_unique_identifier=tool.plugin_unique_identifier,
+                        credential_id=tool.credential_id,
+                    )
 
-                agent_tool = AgentToolEntity(
-                    provider_id=tool_selector.provider_id,
-                    provider_type=ToolProviderType.BUILT_IN,  # Default to built-in
-                    tool_name=tool_selector.tool_name,
-                    tool_parameters=dict(tool_selector.tool_configuration) if tool_selector.tool_configuration else {},
-                    credential_id=tool_selector.credential_id,
-                )
-
-                # Get tool runtime from ToolManager
-                tool_runtime = ToolManager().get_agent_tool_runtime(
-                    tenant_id=self.tenant_id,
-                    app_id=self.app_id,
-                    agent_tool=agent_tool,
-                    invoke_from=self.invoke_from,
-                    variable_pool=variable_pool,
-                )
-                tool_instances.append(tool_runtime)
-            except Exception as e:
-                logger.warning("Failed to load tool %s: %s", tool_selector, str(e))
-                continue
+                    # Get tool runtime from ToolManager
+                    tool_runtime = ToolManager.get_agent_tool_runtime(
+                        tenant_id=self.tenant_id,
+                        app_id=self.app_id,
+                        agent_tool=agent_tool,
+                        invoke_from=self.invoke_from,
+                        variable_pool=variable_pool,
+                    )
+                    tool_instances.append(tool_runtime)
+                except Exception as e:
+                    logger.warning("Failed to load tool %s: %s", tool, str(e))
+                    continue
 
         return tool_instances
 
-    def _fetch_files(self, variable_pool: VariablePool) -> Sequence[File]:
-        """Fetch files from variable pool based on vision configuration."""
-        # Import llm_utils to use the same file fetching logic as LLM Node
+    def _fetch_vision_files(self, variable_pool: VariablePool) -> Sequence[File]:
+        """Fetch files from vision configuration - these go directly to model."""
         from core.workflow.nodes.llm import llm_utils
 
         return llm_utils.fetch_files(
@@ -224,21 +235,28 @@ class AgentNode(Node):
         )
 
     def _prepare_prompt_messages(
-        self, variable_pool: VariablePool, files: Sequence[File] = [], history_prompt: Sequence[PromptMessage] = []
-    ) -> list[PromptMessage]:
-        """Prepare prompt messages from template."""
+        self,
+        variable_pool: VariablePool,
+        files: Sequence[File] = [],
+        history_prompt: Sequence[PromptMessage] = [],
+    ) -> tuple[list[PromptMessage], list[File]]:
+        """Prepare prompt messages from template and extract file variables."""
         prompt_messages: list[PromptMessage] = list(history_prompt)
+        prompt_files: list[File] = []
 
         # Handle chat model messages
         if isinstance(self._node_data.prompt_template, list):
             for i, message in enumerate(self._node_data.prompt_template):
                 # Process message based on edition type
-                if hasattr(message, "edition_type") and message.edition_type == "jinja2":
+                if message.edition_type == "jinja2" and message.jinja2_text:
                     # Handle jinja2 template
                     content = self._process_jinja2_template(message, variable_pool)
-                elif hasattr(message, "text"):
+                elif message.text:
                     # Handle basic template with variable substitution
-                    content = self._process_template_variables(message.text, variable_pool)
+                    content, extracted_files = self._process_template_variables_and_extract_files(
+                        message.text, variable_pool
+                    )
+                    prompt_files.extend(extracted_files)
                 else:
                     content = ""
 
@@ -255,25 +273,12 @@ class AgentNode(Node):
                         prompt_messages.append(self._create_user_message_with_files(content, files))
                     else:
                         prompt_messages.append(UserPromptMessage(content=content))
-                # Skip assistant messages in template
-        else:
-            # Handle completion model prompt template
-            template = self._node_data.prompt_template
-            if isinstance(template, LLMNodeCompletionModelPromptTemplate):
-                if template.edition_type == "jinja2":
-                    # Handle jinja2 template
-                    content = self._process_jinja2_template(template, variable_pool)
-                elif template.text:
-                    content = self._process_template_variables(template.text, variable_pool)
-                else:
-                    content = ""
 
-                if files:
-                    prompt_messages.append(self._create_user_message_with_files(content, files))
-                else:
-                    prompt_messages.append(UserPromptMessage(content=content))
+        # Add file information for prompt files (not vision files)
+        if prompt_files:
+            self._add_file_info_to_messages(prompt_messages, prompt_files)
 
-        return prompt_messages
+        return prompt_messages, prompt_files
 
     def _create_user_message_with_files(self, text_content: str, files: Sequence[File]) -> UserPromptMessage:
         """Create a user message with files attached."""
@@ -303,23 +308,40 @@ class AgentNode(Node):
 
     def _process_template_variables(self, template: str, variable_pool: VariablePool) -> str:
         """Process variables in template string."""
+        content, _ = self._process_template_variables_and_extract_files(template, variable_pool)
+        return content
+
+    def _process_template_variables_and_extract_files(
+        self, template: str, variable_pool: VariablePool
+    ) -> tuple[str, list[File]]:
+        """Process variables in template string and extract file variables."""
+        from core.variables import ArrayFileVariable, FileVariable
+
         # Use VariableTemplateParser to extract and replace variables
         parser = VariableTemplateParser(template)
         variable_selectors = parser.extract_variable_selectors()
 
-        # Build inputs for formatting
+        # Build inputs for formatting and collect files
         inputs = {}
+        files: list[File] = []
+
         for variable_selector in variable_selectors:
             variable = variable_pool.get(variable_selector.value_selector)
             if variable is None:
                 # Use empty string for missing variables
                 inputs[variable_selector.variable] = ""
             else:
+                # Check if it's a file variable
+                if isinstance(variable, FileVariable) and variable.value:
+                    files.append(variable.value)
+                elif isinstance(variable, ArrayFileVariable) and variable.value:
+                    files.extend(variable.value)
+
                 # Convert variable to object representation
                 inputs[variable_selector.variable] = variable.to_object()
 
         # Format the template with actual values
-        return parser.format(inputs)
+        return parser.format(inputs), files
 
     def _process_jinja2_template(self, template_obj: Any, variable_pool: VariablePool) -> str:
         """Process jinja2 template with variables."""
@@ -327,10 +349,7 @@ class AgentNode(Node):
         from core.helper.code_executor import CodeExecutor, CodeLanguage
 
         # Get jinja2 template text
-        jinja2_text = ""
-        if hasattr(template_obj, "jinja2_text"):
-            jinja2_text = template_obj.jinja2_text or ""
-
+        jinja2_text = getattr(template_obj, "jinja2_text", None)
         if not jinja2_text:
             return ""
 
@@ -354,73 +373,84 @@ class AgentNode(Node):
         return code_execute_resp.get("result", "")
 
     def _process_outputs(
-        self, outputs: Generator[LLMResultChunk | AgentLog, None, None], strategy: Any
+        self, outputs: Generator[LLMResultChunk | AgentLog, None, AgentResult], strategy: Any
     ) -> Generator[NodeEventBase, None, None]:
         """Process strategy outputs and convert to node events."""
         text = ""
         files: list[File] = []
         usage = LLMUsage.empty_usage()
         agent_logs: list[AgentLogEvent] = []
-        agent_execution_metadata: Mapping[WorkflowNodeExecutionMetadataKey, Any] = {}
         finish_reason = None
+        agent_result: AgentResult | None = None
 
         # Process each output from strategy
-        for output in outputs:
-            if isinstance(output, AgentLog):
-                # Store agent log event for metadata
-                agent_log_event = AgentLogEvent(
-                    message_id=output.id,
-                    label=output.label,
-                    node_execution_id=self.id,
-                    parent_id=output.parent_id,
-                    error=output.error,
-                    status=output.status.value,
-                    data=output.data,
-                    metadata={k.value: v for k, v in output.metadata.items()},
-                    node_id=self._node_id,
-                )
-                for log in agent_logs:
-                    if log.message_id == agent_log_event.message_id:
-                        # update the log
-                        log.data = agent_log_event.data
-                        log.status = agent_log_event.status
-                        log.error = agent_log_event.error
-                        log.label = agent_log_event.label
-                        log.metadata = agent_log_event.metadata
-                        break
-                else:
-                    agent_logs.append(agent_log_event)
-
-                # Check if tool produced files
-                if output.data and "output" in output.data:
-                    self._extract_files_from_tool_output(output.data["output"], files)
-
-                yield agent_log_event
-            elif isinstance(output, LLMResultChunk):
-                # Handle LLM result chunks
-                if output.delta.message and output.delta.message.content:
-                    chunk_text = output.delta.message.content
-                    if isinstance(chunk_text, list):
-                        chunk_text = "".join(c.data for c in chunk_text if hasattr(c, "data"))
-                    else:
-                        chunk_text = str(chunk_text)
-                    text += chunk_text
-                    yield StreamChunkEvent(
-                        selector=[self._node_id, "text"],
-                        chunk=chunk_text,
-                        is_final=False,
+        try:
+            for output in outputs:
+                if isinstance(output, AgentLog):
+                    # Store agent log event for metadata
+                    agent_log_event = AgentLogEvent(
+                        message_id=output.id,
+                        label=output.label,
+                        node_execution_id=self.id,
+                        parent_id=output.parent_id,
+                        error=output.error,
+                        status=output.status.value,
+                        data=output.data,
+                        metadata={k.value: v for k, v in output.metadata.items()},
+                        node_id=self._node_id,
                     )
+                    for log in agent_logs:
+                        if log.message_id == agent_log_event.message_id:
+                            # update the log
+                            log.data = agent_log_event.data
+                            log.status = agent_log_event.status
+                            log.error = agent_log_event.error
+                            log.label = agent_log_event.label
+                            log.metadata = agent_log_event.metadata
+                            break
+                    else:
+                        agent_logs.append(agent_log_event)
 
-                if output.delta.usage:
-                    self._accumulate_usage(usage, output.delta.usage)
+                    # Tool outputs are handled by the strategy itself
 
-                # Capture finish reason
-                if output.delta.finish_reason:
-                    finish_reason = output.delta.finish_reason
+                    yield agent_log_event
+                elif isinstance(output, LLMResultChunk):
+                    # Handle LLM result chunks
+                    if output.delta.message and output.delta.message.content:
+                        chunk_text = output.delta.message.content
+                        if isinstance(chunk_text, list):
+                            # Extract text from content list
+                            chunk_text = "".join(getattr(c, "data", str(c)) for c in chunk_text)
+                        else:
+                            chunk_text = str(chunk_text)
+                        text += chunk_text
+                        yield StreamChunkEvent(
+                            selector=[self._node_id, "text"],
+                            chunk=chunk_text,
+                            is_final=False,
+                        )
 
-        # Get files produced by tools from strategy
-        if hasattr(strategy, "files"):
-            files.extend(strategy.files)
+                    if output.delta.usage:
+                        self._accumulate_usage(usage, output.delta.usage)
+
+                    # Capture finish reason
+                    if output.delta.finish_reason:
+                        finish_reason = output.delta.finish_reason
+
+        except StopIteration as e:
+            # Get the return value from generator
+            if isinstance(getattr(e, "value", None), AgentResult):
+                agent_result = e.value
+
+        # Use result from generator if available
+        if agent_result:
+            text = agent_result.text or text
+            files = agent_result.files
+            if agent_result.usage:
+                usage = agent_result.usage
+            if agent_result.finish_reason:
+                finish_reason = agent_result.finish_reason
+        # else: Fallback - no files from old approach
 
         # Send final events for all streams
         yield StreamChunkEvent(
@@ -440,7 +470,6 @@ class AgentNode(Node):
                     "finish_reason": finish_reason,
                 },
                 metadata={
-                    **agent_execution_metadata,
                     WorkflowNodeExecutionMetadataKey.AGENT_LOG: agent_logs,
                 },
                 inputs=self._prepare_inputs_for_log(),
@@ -448,20 +477,24 @@ class AgentNode(Node):
             )
         )
 
-    def _extract_files_from_tool_output(self, output: Any, files: list[File]) -> None:
-        """Extract files from tool output.
+    def _add_file_info_to_messages(self, prompt_messages: list[PromptMessage], prompt_files: Sequence[File]) -> None:
+        """Add file information to prompt messages."""
+        from core.agent.tools.prompt import generate_file_prompt
 
-        This method checks if the tool output contains file information and
-        extracts File objects from it.
-        """
-        # Handle ToolInvokeMessage if tool outputs are structured
-        if isinstance(output, str):
-            # Simple string output, no files
-            return
+        file_info = generate_file_prompt(prompt_files)
 
-        # TODO: Implement actual file extraction logic based on tool output structure
-        # This would depend on how tools return file information in your system
-        pass
+        # Add to system message or create new one
+        if prompt_messages and isinstance(prompt_messages[0], SystemPromptMessage):
+            # Ensure content is string before concatenation
+            existing_content = prompt_messages[0].content
+            if isinstance(existing_content, str):
+                prompt_messages[0].content = existing_content + f"\n\n{file_info}"
+            else:
+                # If content is not string, create new system message
+                prompt_messages.insert(0, SystemPromptMessage(content=file_info))
+        else:
+            # Insert at beginning if no system message exists
+            prompt_messages.insert(0, SystemPromptMessage(content=file_info))
 
     def _accumulate_usage(self, total_usage: LLMUsage, delta_usage: LLMUsage) -> None:
         """Accumulate LLM usage statistics."""
@@ -481,7 +514,7 @@ class AgentNode(Node):
             },
             "tools": [
                 {
-                    "provider_id": tool.provider_id,
+                    "provider_id": tool.provider_name,
                     "tool_name": tool.tool_name,
                 }
                 for tool in self._node_data.tools
@@ -519,10 +552,10 @@ class AgentNode(Node):
         if isinstance(prompt_template, list):
             # For chat model messages
             for prompt in prompt_template:
-                if hasattr(prompt, "text") and prompt.text:
-                    # Skip jinja2 templates for now (handled separately)
-                    if hasattr(prompt, "edition_type") and prompt.edition_type == "jinja2":
-                        continue
+                # Skip jinja2 templates (handled separately)
+                if prompt.edition_type == "jinja2":
+                    continue
+                if prompt.text:
                     parser = VariableTemplateParser(template=prompt.text)
                     variable_selectors.extend(parser.extract_variable_selectors())
         elif isinstance(prompt_template, LLMNodeCompletionModelPromptTemplate):
@@ -553,9 +586,10 @@ class AgentNode(Node):
 
         # Extract variables from tool configurations
         if typed_node_data.tools:
-            for tool_idx, tool_selector in enumerate(typed_node_data.tools):
-                if tool_selector.tool_configuration:
-                    for param_name, param_value in tool_selector.tool_configuration.items():
+            for tool_idx, tool_config in enumerate(typed_node_data.tools):
+                # Get tool parameters from ToolMetadata
+                if tool_config.parameters:
+                    for param_name, param_value in tool_config.parameters.items():
                         if isinstance(param_value, str):
                             # Parse template variables in tool parameters
                             tool_parser = VariableTemplateParser(template=param_value)
@@ -571,7 +605,7 @@ class AgentNode(Node):
             enable_jinja = False
             if isinstance(prompt_template, list):
                 for prompt in prompt_template:
-                    if hasattr(prompt, "edition_type") and prompt.edition_type == "jinja2":
+                    if prompt.edition_type == "jinja2":
                         enable_jinja = True
                         break
             elif (
@@ -580,7 +614,7 @@ class AgentNode(Node):
             ):
                 enable_jinja = True
 
-            if enable_jinja:
+            if enable_jinja and typed_node_data.prompt_config.jinja2_variables:
                 for variable_selector in typed_node_data.prompt_config.jinja2_variables:
                     variable_mapping[variable_selector.variable] = variable_selector.value_selector
 

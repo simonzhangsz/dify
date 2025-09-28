@@ -4,7 +4,7 @@ import json
 from collections.abc import Generator
 from typing import Any
 
-from core.agent.entities import AgentLog, AgentScratchpadUnit
+from core.agent.entities import AgentLog, AgentResult, AgentScratchpadUnit
 from core.agent.output_parser.cot_output_parser import CotAgentOutputParser
 from core.agent.prompt.template import REACT_PROMPT_TEMPLATES
 from core.file import File
@@ -31,13 +31,16 @@ class ReActStrategy(AgentStrategy):
         model_parameters: dict[str, Any],
         stop: list[str] = [],
         stream: bool = True,
-    ) -> Generator[LLMResultChunk | AgentLog, None, None]:
+    ) -> Generator[LLMResultChunk | AgentLog, None, AgentResult]:
         """Execute the ReAct agent strategy."""
         # Initialize variables
         agent_scratchpad: list[AgentScratchpadUnit] = []
         iteration_step = 1
         max_iterations = self.max_iterations + 1
         llm_usage = {"usage": None}
+        files: list[File] = []  # Track files produced by tools
+        final_text: str = ""
+        finish_reason: str | None = None
 
         # Add "Observation" to stop sequences
         if "Observation" not in stop:
@@ -74,9 +77,12 @@ class ReActStrategy(AgentStrategy):
             )
             yield model_log
 
+            # Check for files to add to messages before invoking model
+            messages_to_use = self._prepare_messages_with_files(current_messages)
+
             # Invoke model
             chunks = self.model_instance.invoke_llm(
-                prompt_messages=current_messages,
+                prompt_messages=messages_to_use,
                 model_parameters=model_parameters,
                 tools=[],
                 stop=stop,
@@ -144,7 +150,8 @@ class ReActStrategy(AgentStrategy):
                     final_answer = scratchpad.action.action_input
                     if isinstance(final_answer, dict):
                         final_answer = json.dumps(final_answer, ensure_ascii=False)
-                    yield self._create_text_chunk(str(final_answer), current_messages)
+                    final_text = str(final_answer)
+                    yield self._create_text_chunk(final_text, current_messages)
 
                 # Finish round log before breaking
                 yield self._finish_log(
@@ -180,6 +187,11 @@ class ReActStrategy(AgentStrategy):
             )
 
             iteration_step += 1
+
+        # Return final result
+        from core.agent.entities import AgentResult
+
+        return AgentResult(text=final_text, files=files, usage=llm_usage.get("usage"), finish_reason=finish_reason)
 
     def _build_prompt_with_react_format(
         self,
@@ -329,7 +341,7 @@ class ReActStrategy(AgentStrategy):
                             tool_files.append(file)
 
         # Track files produced by this tool
-        self.files.extend(tool_files)
+        files.extend(tool_files)
 
         # Finish tool log
         yield self._finish_log(
