@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from core.app.entities.app_invoke_entities import InvokeFrom
 from core.file import FILE_MODEL_IDENTITY, File, FileTransferMethod
 from core.tools.__base.tool import Tool
 from core.tools.__base.tool_runtime import ToolRuntime
@@ -18,7 +19,8 @@ from core.tools.errors import ToolInvokeError
 from extensions.ext_database import db
 from factories.file_factory import build_from_mapping
 from libs.login import current_user
-from models.model import App
+from models.account import Account
+from models.model import App, EndUser
 from models.workflow import Workflow
 
 logger = logging.getLogger(__name__)
@@ -79,11 +81,13 @@ class WorkflowTool(Tool):
         generator = WorkflowAppGenerator()
         assert self.runtime is not None
         assert self.runtime.invoke_from is not None
-        assert current_user is not None
+        user = self._resolve_user(user_id)
+        if user is None:
+            raise ToolInvokeError("workflow tool invoke missing user context")
         result = generator.generate(
             app_model=app,
             workflow=workflow,
-            user=current_user,
+            user=user,
             args={"inputs": tool_parameters, "files": files},
             invoke_from=self.runtime.invoke_from,
             streaming=False,
@@ -227,3 +231,26 @@ class WorkflowTool(Tool):
         elif transfer_method == FileTransferMethod.LOCAL_FILE:
             file_dict["upload_file_id"] = file_dict.get("related_id")
         return file_dict
+
+    def _resolve_user(self, user_id: str) -> Account | EndUser | None:
+        runtime = self.runtime
+        try:
+            user_candidate = current_user
+        except RuntimeError:
+            user_candidate = None
+
+        if user_candidate is not None and getattr(user_candidate, "is_authenticated", False):
+            return user_candidate
+
+        if not user_id or runtime is None:
+            return None
+
+        invoke_from = runtime.invoke_from
+        if invoke_from in {InvokeFrom.SERVICE_API, InvokeFrom.WEB_APP, InvokeFrom.PUBLISHED}:
+            end_user = (
+                db.session.query(EndUser).where(EndUser.id == user_id, EndUser.tenant_id == runtime.tenant_id).first()
+            )
+            if end_user:
+                return end_user
+
+        return db.session.query(Account).where(Account.id == user_id).first()
