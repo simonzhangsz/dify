@@ -5,7 +5,7 @@ from core.model_manager import ModelInstance
 from core.model_runtime.entities.model_entities import ModelFeature
 from core.tools.__base.tool import Tool
 
-from .base import AgentStrategy
+from .base import AgentPattern
 from .function_call import FunctionCallStrategy
 from .react import ReActStrategy
 
@@ -24,7 +24,7 @@ class StrategyFactory:
         tools: list[Tool],
         max_iterations: int = 10,
         workflow_call_depth: int = 0,
-    ) -> AgentStrategy:
+    ) -> AgentPattern:
         """
         Create an appropriate strategy based on model features.
 

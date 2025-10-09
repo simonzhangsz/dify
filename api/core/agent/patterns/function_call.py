@@ -20,10 +20,10 @@ from core.tools.entities.tool_entities import ToolInvokeMessage
 from core.tools.tool_engine import DifyWorkflowCallbackHandler, ToolEngine
 from core.workflow.nodes.llm.node import LLMUsage
 
-from .base import AgentStrategy
+from .base import AgentPattern
 
 
-class FunctionCallStrategy(AgentStrategy):
+class FunctionCallStrategy(AgentPattern):
     """Function Call strategy using model's native tool calling capability."""
 
     def run(
@@ -234,6 +234,22 @@ class FunctionCallStrategy(AgentStrategy):
         if not tool_instance:
             raise ValueError(f"Tool {tool_name} not found")
 
+        # Inject files from tool_file_map if available
+        # Find the file dispatcher tool and get its tool_file_map
+        from core.agent.tools.file_dispatcher import FileDispatcherTool
+
+        tool_file_map = None
+        for tool in self.tools:
+            if isinstance(tool, FileDispatcherTool):
+                tool_file_map = tool.tool_file_map
+                break
+
+        if tool_file_map and tool_name in tool_file_map:
+            file_params = tool_file_map[tool_name]
+            for param_name, file in file_params.items():
+                if param_name not in tool_args:
+                    tool_args[param_name] = file
+
         # Invoke tool
 
         # Use invoke method instead of generic_invoke for agent usage
@@ -273,7 +289,14 @@ class FunctionCallStrategy(AgentStrategy):
                 if response.meta and "file" in response.meta:
                     file = response.meta["file"]
                     if isinstance(file, File):
-                        tool_files.append(file)
+                        # Check if file is for model or tool output
+                        if response.meta.get("target") == "self":
+                            # File is for model - add to files for next prompt
+                            self.files.append(file)
+                            response_content += f"File '{file.filename}' has been loaded into your context."
+                        else:
+                            # File is tool output
+                            tool_files.append(file)
 
         yield self._finish_log(
             tool_call_log,

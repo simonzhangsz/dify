@@ -1,6 +1,6 @@
 """Agent built-in tools manager."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from core.file import File
@@ -18,14 +18,12 @@ class AgentBuiltinToolsManager:
     @staticmethod
     def create_file_dispatcher(
         files: Sequence[File],
-        on_file_for_model: Callable[[File], None] | None = None,
         tool_file_map: dict[str, dict[str, File]] | None = None,
     ) -> Tool | None:
         """Create file dispatcher tool if files are available.
 
         Args:
             files: Available files
-            on_file_for_model: Callback when file is dispatched to model
             tool_file_map: Shared map for tool files
 
         Returns:
@@ -35,7 +33,7 @@ class AgentBuiltinToolsManager:
             return None
 
         try:
-            return FileDispatcherTool(files, on_file_for_model, tool_file_map)
+            return FileDispatcherTool(files, tool_file_map)
         except Exception as e:
             # Log error but don't fail the agent
             import logging

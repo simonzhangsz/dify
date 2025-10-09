@@ -17,7 +17,7 @@ from core.model_runtime.entities.llm_entities import LLMUsage
 from core.tools.__base.tool import Tool
 
 
-class AgentStrategy(ABC):
+class AgentPattern(ABC):
     """Base class for agent execution strategies."""
 
     def __init__(

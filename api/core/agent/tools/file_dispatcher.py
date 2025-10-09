@@ -1,6 +1,6 @@
 """Simple file dispatcher tool for agents."""
 
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.file import File
@@ -27,19 +27,16 @@ class FileDispatcherTool(Tool):
     def __init__(
         self,
         files: Sequence[File],
-        on_file_for_model: Callable[[File], None] | None = None,
         tool_file_map: dict[str, dict[str, File]] | None = None,
     ):
         """Initialize file dispatcher.
 
         Args:
             files: Available files
-            on_file_for_model: Callback when file is dispatched to model
             tool_file_map: Shared map for tool files {tool_name: {param_name: file}}
         """
         self.files = files
         self.file_map = {f.filename: f for f in files}
-        self.on_file_for_model = on_file_for_model
         self.tool_file_map = tool_file_map or {}
 
         # Initialize entity and runtime
@@ -67,9 +64,10 @@ class FileDispatcherTool(Tool):
                 provider="system",
             ),
             description=ToolDescription(
-                llm="Dispatch a file either to yourself (for analysis) or to another tool. "
-                "If target='self', the file content will be added to your next prompt. "
-                "If target is a tool name, the file will be passed to that tool.",
+                llm="Dispatch a file either to yourself (for analysis) or to another tool's specific parameter. "
+                "Use target='self' to load file content into your context. "
+                "For other tools, use ONLY the tool name without any prefix "
+                "(e.g., 'markdown_converter' not 'functions.markdown_converter').",
                 human=I18nObject(en_US="Dispatch file", zh_CN="分发文件"),
             ),
             parameters=[
@@ -97,7 +95,11 @@ class FileDispatcherTool(Tool):
                     required=True,
                     label=I18nObject(en_US="Target", zh_CN="目标"),
                     human_description=I18nObject(en_US="Target for the file", zh_CN="文件目标"),
-                    llm_description="Use 'self' to load file content into your context, or specify a tool name",
+                    llm_description=(
+                        "Where to send the file. Use 'self' to analyze file content yourself, "
+                        "or use the exact tool name only (e.g., 'image_analyzer', NOT 'functions.image_analyzer'). "
+                        "Do not include 'functions.' prefix"
+                    ),
                     form=ToolParameter.ToolParameterForm.LLM,
                 ),
                 ToolParameter(
@@ -106,7 +108,11 @@ class FileDispatcherTool(Tool):
                     required=False,
                     label=I18nObject(en_US="Parameter Name", zh_CN="参数名称"),
                     human_description=I18nObject(en_US="Parameter name for tool", zh_CN="工具参数名"),
-                    llm_description="When target is a tool, specify the parameter name (default: 'file')",
+                    llm_description=(
+                        "When target is a tool, specify which parameter accepts files "
+                        "(check the system prompt for available tools and their file parameters). "
+                        "Skip this for target='self'"
+                    ),
                     form=ToolParameter.ToolParameterForm.LLM,
                     default="file",
                 ),
@@ -140,20 +146,38 @@ class FileDispatcherTool(Tool):
             return
 
         if target == "self":
-            # Dispatch to model - mark file for inclusion in next prompt
-            if self.on_file_for_model:
-                self.on_file_for_model(file)
-            yield self.create_text_message(
-                f"File '{file.filename}' will be loaded into your context in the next message."
+            # Dispatch to model - return FILE message for pattern to handle
+            yield ToolInvokeMessage(
+                type=ToolInvokeMessage.MessageType.FILE,
+                message=ToolInvokeMessage.FileMessage(),
+                meta={"file": file, "target": "self"},
             )
         else:
-            # Dispatch to tool - ensure target is a string
-            target_str = str(target)
-            param_name_str = str(parameter_name)
+            # Dispatch to tool
+            tool_name = target.strip()
+            param_name = parameter_name.strip()
 
-            if target_str not in self.tool_file_map:
-                self.tool_file_map[target_str] = {}
-            self.tool_file_map[target_str][param_name_str] = file
-            yield self.create_text_message(
-                f"File '{file.filename}' is now available for tool '{target_str}' as parameter '{param_name_str}'."
+            # Remove 'functions.' prefix if present
+            if tool_name.startswith("functions."):
+                tool_name = tool_name[10:]  # Remove 'functions.' prefix
+                yield self.create_text_message(f"Note: Removed 'functions.' prefix. Using tool name: '{tool_name}'")
+
+            if not tool_name:
+                yield self.create_text_message("Tool name cannot be empty")
+                return
+
+            if not param_name:
+                yield self.create_text_message("Parameter name cannot be empty")
+                return
+
+            # Store file in tool_file_map
+            if tool_name not in self.tool_file_map:
+                self.tool_file_map[tool_name] = {}
+            self.tool_file_map[tool_name][param_name] = file
+
+            # Return a FILE type message to indicate file dispatch
+            yield ToolInvokeMessage(
+                type=ToolInvokeMessage.MessageType.FILE,
+                message=ToolInvokeMessage.FileMessage(),
+                meta={"file": file, "target_tool": tool_name, "parameter_name": param_name},
             )

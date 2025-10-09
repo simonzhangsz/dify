@@ -135,16 +135,13 @@ class AgentNode(Node):
 
             # Add file dispatcher if prompt files exist
             if prompt_files:
-
-                def on_file_for_model(file: File):
-                    strategy.files.append(file)
-
-                file_dispatcher = AgentBuiltinToolsManager.create_file_dispatcher(
-                    prompt_files, on_file_for_model=on_file_for_model
-                )
+                file_dispatcher = AgentBuiltinToolsManager.create_file_dispatcher(prompt_files)
                 if file_dispatcher:
                     # Add file dispatcher to strategy's tools
                     strategy.tools = list(strategy.tools) + [file_dispatcher]
+
+                    # Add tool file parameter info to prompt
+                    self._add_tool_file_params_to_messages(prompt_messages, strategy.tools)
 
             # Run strategy
             outputs = strategy.run(
@@ -495,6 +492,27 @@ class AgentNode(Node):
         else:
             # Insert at beginning if no system message exists
             prompt_messages.insert(0, SystemPromptMessage(content=file_info))
+
+    def _add_tool_file_params_to_messages(self, prompt_messages: list[PromptMessage], tools: Sequence[Tool]) -> None:
+        """Add tool file parameter information to prompt messages."""
+        from core.agent.tools.prompt import generate_tool_file_params_prompt
+
+        tool_file_info = generate_tool_file_params_prompt(tools)
+        if not tool_file_info:
+            return
+
+        # Add to system message or create new one
+        if prompt_messages and isinstance(prompt_messages[0], SystemPromptMessage):
+            # Ensure content is string before concatenation
+            existing_content = prompt_messages[0].content
+            if isinstance(existing_content, str):
+                prompt_messages[0].content = existing_content + f"\n{tool_file_info}"
+            else:
+                # If content is not string, create new system message
+                prompt_messages.insert(0, SystemPromptMessage(content=tool_file_info))
+        else:
+            # Insert at beginning if no system message exists
+            prompt_messages.insert(0, SystemPromptMessage(content=tool_file_info))
 
     def _accumulate_usage(self, total_usage: LLMUsage, delta_usage: LLMUsage) -> None:
         """Accumulate LLM usage statistics."""

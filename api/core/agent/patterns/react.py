@@ -19,10 +19,10 @@ from core.tools.__base.tool import Tool
 from core.tools.entities.tool_entities import ToolInvokeMessage
 from core.tools.tool_engine import DifyWorkflowCallbackHandler, ToolEngine
 
-from .base import AgentStrategy
+from .base import AgentPattern
 
 
-class ReActStrategy(AgentStrategy):
+class ReActStrategy(AgentPattern):
     """ReAct strategy using reasoning and acting approach."""
 
     def run(
@@ -312,6 +312,22 @@ class ReActStrategy(AgentStrategy):
         elif not isinstance(tool_args, dict):
             tool_args = {"input": str(tool_args)}
 
+        # Inject files from tool_file_map if available
+        # Find the file dispatcher tool and get its tool_file_map
+        from core.agent.tools.file_dispatcher import FileDispatcherTool
+
+        tool_file_map = None
+        for tool in self.tools:
+            if isinstance(tool, FileDispatcherTool):
+                tool_file_map = tool.tool_file_map
+                break
+
+        if tool_file_map and tool_name in tool_file_map:
+            file_params = tool_file_map[tool_name]
+            for param_name, file in file_params.items():
+                if param_name not in tool_args:
+                    tool_args[param_name] = file
+
         # Invoke tool
         tool_response = ToolEngine().generic_invoke(
             tool=tool_instance,
@@ -338,7 +354,14 @@ class ReActStrategy(AgentStrategy):
                     if response.meta and "file" in response.meta:
                         file = response.meta["file"]
                         if isinstance(file, File):
-                            tool_files.append(file)
+                            # Check if file is for model or tool output
+                            if response.meta.get("target") == "self":
+                                # File is for model - add to files for next prompt
+                                self.files.append(file)
+                                response_content += f"File '{file.filename}' has been loaded into your context."
+                            else:
+                                # File is tool output
+                                tool_files.append(file)
 
         # Track files produced by this tool
         files.extend(tool_files)

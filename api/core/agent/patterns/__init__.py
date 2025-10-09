@@ -6,13 +6,13 @@ This module provides different strategies for agent execution:
 - StrategyFactory: Factory for creating strategies based on model features
 """
 
-from .base import AgentStrategy
+from .base import AgentPattern
 from .function_call import FunctionCallStrategy
 from .react import ReActStrategy
 from .strategy_factory import StrategyFactory
 
 __all__ = [
-    "AgentStrategy",
+    "AgentPattern",
     "FunctionCallStrategy",
     "ReActStrategy",
     "StrategyFactory",
