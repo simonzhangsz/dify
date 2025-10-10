@@ -49,8 +49,8 @@ agent/patterns/
 The module is designed to be used by:
 
 1. **Agent V2 Nodes**: In workflow orchestration for complex agent tasks
-2. **Agent Applications**: For standalone conversational agents
-3. **Custom Implementations**: As a foundation for building specialized agent behaviors
+1. **Agent Applications**: For standalone conversational agents
+1. **Custom Implementations**: As a foundation for building specialized agent behaviors
 
 ## Integration Points
 
@@ -62,6 +62,6 @@ The module is designed to be used by:
 ## Benefits
 
 1. **Consistency**: Unified implementation reduces code duplication and maintenance overhead
-2. **Flexibility**: Easy to extend with new strategies or customize existing ones
-3. **Performance**: Optimized for each model's capabilities to ensure best performance
-4. **Reliability**: Built-in safety mechanisms and error handling
+1. **Flexibility**: Easy to extend with new strategies or customize existing ones
+1. **Performance**: Optimized for each model's capabilities to ensure best performance
+1. **Reliability**: Built-in safety mechanisms and error handling

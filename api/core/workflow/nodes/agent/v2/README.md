@@ -72,11 +72,11 @@ vision: {}
 ## Implementation Details
 
 1. The node receives configuration and initializes
-2. Model features are detected to determine strategy
-3. Tools are loaded and validated
-4. Agent pattern is created using StrategyFactory
-5. Execution proceeds with the selected strategy
-6. Results include text output, files, and usage statistics
+1. Model features are detected to determine strategy
+1. Tools are loaded and validated
+1. Agent pattern is created using StrategyFactory
+1. Execution proceeds with the selected strategy
+1. Results include text output, files, and usage statistics
 
 ## Usage in Workflows
 
