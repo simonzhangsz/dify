@@ -154,10 +154,11 @@ class AgentPattern(ABC):
         from core.model_runtime.entities import UserPromptMessage
         from core.model_runtime.entities.message_entities import (
             ImagePromptMessageContent,
+            PromptMessageContentUnionTypes,
             TextPromptMessageContent,
         )
 
-        content = []
+        content: list[PromptMessageContentUnionTypes] = []
         if text:
             content.append(TextPromptMessageContent(data=text))
 

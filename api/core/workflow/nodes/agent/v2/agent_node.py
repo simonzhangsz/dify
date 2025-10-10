@@ -102,7 +102,7 @@ class AgentNode(Node):
 
             # Prepare tools
             tool_instances = self._prepare_tool_instances(variable_pool)
-            history_prompt = []
+            history_prompt: Sequence[PromptMessage] = []
             if self._node_data.memory:
                 from core.workflow.nodes.llm import llm_utils
 
