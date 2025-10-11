@@ -6,7 +6,6 @@ from typing import Any
 
 from core.agent.entities import AgentLog, AgentResult, AgentToolEntity, ExecutionContext
 from core.agent.patterns import StrategyFactory
-from core.agent.tools.manager import AgentBuiltinToolsManager
 from core.file import File, file_manager
 from core.model_manager import ModelInstance, ModelManager
 from core.model_runtime.entities import (
@@ -128,20 +127,11 @@ class AgentNode(Node):
                 model_features=model_features,
                 model_instance=model_instance,
                 tools=tool_instances,
+                files=prompt_files,
                 max_iterations=10,
                 # TODO conversation_id and message_id
                 context=ExecutionContext(user_id=self.user_id, app_id=self.app_id, tenant_id=self.tenant_id),
             )
-
-            # Add file dispatcher if prompt files exist
-            if prompt_files:
-                file_dispatcher = AgentBuiltinToolsManager.create_file_dispatcher(prompt_files)
-                if file_dispatcher:
-                    # Add file dispatcher to strategy's tools
-                    strategy.tools = list(strategy.tools) + [file_dispatcher]
-
-                    # Add tool file parameter info to prompt
-                    self._add_tool_file_params_to_messages(prompt_messages, strategy.tools)
 
             # Run strategy
             outputs = strategy.run(
@@ -234,7 +224,7 @@ class AgentNode(Node):
     def _prepare_prompt_messages(
         self,
         variable_pool: VariablePool,
-        files: Sequence[File] = [],
+        vision_files: Sequence[File] = [],
         history_prompt: Sequence[PromptMessage] = [],
     ) -> tuple[list[PromptMessage], list[File]]:
         """Prepare prompt messages from template and extract file variables."""
@@ -266,14 +256,14 @@ class AgentNode(Node):
                         msg.role != PromptMessageRole.USER for msg in self._node_data.prompt_template[i + 1 :]
                     )
 
-                    if files and is_last_user_message:
-                        prompt_messages.append(self._create_user_message_with_files(content, files))
+                    if vision_files and is_last_user_message:
+                        prompt_messages.append(self._create_user_message_with_files(content, vision_files))
                     else:
                         prompt_messages.append(UserPromptMessage(content=content))
 
         # Add file information for prompt files (not vision files)
         if prompt_files:
-            self._add_file_info_to_messages(prompt_messages, prompt_files)
+            prompt_messages = self._add_file_info_to_messages(prompt_messages, prompt_files)
 
         return prompt_messages, prompt_files
 
@@ -331,9 +321,13 @@ class AgentNode(Node):
                 # Check if it's a file variable
                 if isinstance(variable, FileVariable) and variable.value:
                     files.append(variable.value)
+                    inputs[variable_selector.variable] = ""
+                    continue
                 elif isinstance(variable, ArrayFileVariable) and variable.value:
                     files.extend(variable.value)
-
+                    # re
+                    inputs[variable_selector.variable] = ""
+                    continue
                 # Convert variable to object representation
                 inputs[variable_selector.variable] = variable.to_object()
 
@@ -474,45 +468,78 @@ class AgentNode(Node):
             )
         )
 
-    def _add_file_info_to_messages(self, prompt_messages: list[PromptMessage], prompt_files: Sequence[File]) -> None:
+    def _generate_file_prompt(self, files: Sequence[File]) -> str:
+        """Generate a prompt describing available files.
+
+        Args:
+            files: Available files
+
+        Returns:
+            Formatted prompt string describing the files
+        """
+        if not files:
+            return ""
+
+        file_info = "Files are available for your use:\n"
+
+        for file in files:
+            file_type = file.type.value if file.type else "unknown"
+            file_size = f"{file.size:,} bytes" if file.size else "unknown size"
+            file_info += (
+                f"file_id: {file.related_id}, file_name: {file.filename} (Type: {file_type}, Size: {file_size})\n"
+            )
+
+        return file_info
+
+    def _add_file_info_to_messages(
+        self, prompt_messages: list[PromptMessage], prompt_files: Sequence[File]
+    ) -> list[PromptMessage]:
         """Add file information to prompt messages."""
-        from core.agent.tools.prompt import generate_file_prompt
 
-        file_info = generate_file_prompt(prompt_files)
+        file_info = self._generate_file_prompt(prompt_files)
 
-        # Add to system message or create new one
-        if prompt_messages and isinstance(prompt_messages[0], SystemPromptMessage):
-            # Ensure content is string before concatenation
-            existing_content = prompt_messages[0].content
+        # Find the last user message and append file info to it
+        last_user_message_index = -1
+        for i in range(len(prompt_messages) - 1, -1, -1):
+            if isinstance(prompt_messages[i], UserPromptMessage):
+                last_user_message_index = i
+                break
+
+        if last_user_message_index >= 0:
+            # Append to the last user message
+            existing_message = prompt_messages[last_user_message_index]
+            existing_content = existing_message.content
+
             if isinstance(existing_content, str):
-                prompt_messages[0].content = existing_content + f"\n\n{file_info}"
-            else:
-                # If content is not string, create new system message
-                prompt_messages.insert(0, SystemPromptMessage(content=file_info))
+                # If content is string, append file info
+                prompt_messages[last_user_message_index] = UserPromptMessage(
+                    content=existing_content + f"\n\n{file_info}"
+                )
+            elif isinstance(existing_content, list):
+                # If content is list (multimodal), add text content with file info
+                from core.model_runtime.entities.message_entities import TextPromptMessageContent
+
+                new_contents = list(existing_content)
+
+                # Check if last item is text content
+                found_text_content = False
+                for i in range(len(new_contents) - 1, -1, -1):
+                    if isinstance(new_contents[i], TextPromptMessageContent):
+                        # Create a new text content with combined data
+                        last_text = new_contents[i].data
+                        new_contents[i] = TextPromptMessageContent(data=last_text + f"\n\n{file_info}")
+                        found_text_content = True
+                        break
+
+                if not found_text_content:
+                    # Add new text content
+                    new_contents.append(TextPromptMessageContent(data=file_info))
+                prompt_messages[last_user_message_index] = UserPromptMessage(content=new_contents)
         else:
-            # Insert at beginning if no system message exists
-            prompt_messages.insert(0, SystemPromptMessage(content=file_info))
+            # No user message found, create a new one
+            prompt_messages.append(UserPromptMessage(content=file_info))
 
-    def _add_tool_file_params_to_messages(self, prompt_messages: list[PromptMessage], tools: Sequence[Tool]) -> None:
-        """Add tool file parameter information to prompt messages."""
-        from core.agent.tools.prompt import generate_tool_file_params_prompt
-
-        tool_file_info = generate_tool_file_params_prompt(tools)
-        if not tool_file_info:
-            return
-
-        # Add to system message or create new one
-        if prompt_messages and isinstance(prompt_messages[0], SystemPromptMessage):
-            # Ensure content is string before concatenation
-            existing_content = prompt_messages[0].content
-            if isinstance(existing_content, str):
-                prompt_messages[0].content = existing_content + f"\n{tool_file_info}"
-            else:
-                # If content is not string, create new system message
-                prompt_messages.insert(0, SystemPromptMessage(content=tool_file_info))
-        else:
-            # Insert at beginning if no system message exists
-            prompt_messages.insert(0, SystemPromptMessage(content=tool_file_info))
+        return prompt_messages
 
     def _accumulate_usage(self, total_usage: LLMUsage, delta_usage: LLMUsage) -> None:
         """Accumulate LLM usage statistics."""

@@ -1,6 +1,7 @@
 """Function Call strategy implementation."""
 
 import json
+import re
 from collections.abc import Generator
 from typing import Any, Union
 
@@ -45,7 +46,7 @@ class FunctionCallStrategy(AgentPattern):
         messages: list[PromptMessage] = list(prompt_messages)  # Create mutable copy
         final_text: str = ""
         finish_reason: str | None = None
-        files: list[File] = []  # Track files produced by tools
+        output_files: list[File] = []  # Track files produced by tools
 
         while function_call_state and iteration_step <= max_iterations:
             function_call_state = False
@@ -68,12 +69,9 @@ class FunctionCallStrategy(AgentPattern):
             )
             yield model_log
 
-            # Check for files to add to messages before invoking model
-            messages_to_use = self._prepare_messages_with_files(messages)
-
             # Invoke model
             chunks: Union[Generator[LLMResultChunk, None, None], LLMResult] = self.model_instance.invoke_llm(
-                prompt_messages=messages_to_use,
+                prompt_messages=messages,
                 model_parameters=model_parameters,
                 tools=current_tools,
                 stop=stop,
@@ -105,7 +103,7 @@ class FunctionCallStrategy(AgentPattern):
                         tool_name, tool_args, tool_call_id, messages, round_log
                     )
                     # Track files produced by tools
-                    files.extend(tool_files)
+                    output_files.extend(tool_files)
             yield self._finish_log(
                 round_log,
                 data={
@@ -123,7 +121,7 @@ class FunctionCallStrategy(AgentPattern):
         # Return final result
         from core.agent.entities import AgentResult
 
-        return AgentResult(text=final_text, files=files, usage=llm_usage["usage"], finish_reason=finish_reason)
+        return AgentResult(text=final_text, files=output_files, usage=llm_usage["usage"], finish_reason=finish_reason)
 
     def _handle_chunks(
         self,
@@ -235,20 +233,8 @@ class FunctionCallStrategy(AgentPattern):
             raise ValueError(f"Tool {tool_name} not found")
 
         # Inject files from tool_file_map if available
-        # Find the file dispatcher tool and get its tool_file_map
-        from core.agent.tools.file_dispatcher import FileDispatcherTool
-
-        tool_file_map = None
-        for tool in self.tools:
-            if isinstance(tool, FileDispatcherTool):
-                tool_file_map = tool.tool_file_map
-                break
-
-        if tool_file_map and tool_name in tool_file_map:
-            file_params = tool_file_map[tool_name]
-            for param_name, file in file_params.items():
-                if param_name not in tool_args:
-                    tool_args[param_name] = file
+        # Process tool_args to replace file references with actual File objects
+        tool_args = self._replace_file_references(tool_args)
 
         # Invoke tool
 
@@ -316,3 +302,74 @@ class FunctionCallStrategy(AgentPattern):
             )
         )
         return response_content, tool_files
+
+    def _replace_file_references(self, tool_args: dict[str, Any]) -> dict[str, Any]:
+        """
+        Replace file references in tool arguments with actual File objects.
+
+        Args:
+            tool_args: Dictionary of tool arguments
+
+        Returns:
+            Updated tool arguments with file references replaced
+        """
+        # Process each argument in the dictionary
+        processed_args: dict[str, Any] = {}
+        for key, value in tool_args.items():
+            processed_args[key] = self._process_file_reference(value)
+        return processed_args
+
+    def _process_file_reference(self, data: Any) -> Any:
+        """
+        Recursively process data to replace file references.
+        Supports both single file [File: file_id] and multiple files [Files: file_id1, file_id2, ...].
+
+        Args:
+            data: The data to process (can be dict, list, str, or other types)
+
+        Returns:
+            Processed data with file references replaced
+        """
+        single_file_pattern = re.compile(r"^\[File:\s*([^\]]+)\]$")
+        multiple_files_pattern = re.compile(r"^\[Files:\s*([^\]]+)\]$")
+
+        if isinstance(data, dict):
+            # Process dictionary recursively
+            return {key: self._process_file_reference(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            # Process list recursively
+            return [self._process_file_reference(item) for item in data]
+        elif isinstance(data, str):
+            # Check for single file pattern [File: file_id]
+            single_match = single_file_pattern.match(data.strip())
+            if single_match:
+                file_id = single_match.group(1).strip()
+                # Find the file in self.files
+                for file in self.files:
+                    if hasattr(file, "id") and str(file.id) == file_id:
+                        return file
+                # If file not found, return original value
+                return data
+
+            # Check for multiple files pattern [Files: file_id1, file_id2, ...]
+            multiple_match = multiple_files_pattern.match(data.strip())
+            if multiple_match:
+                file_ids_str = multiple_match.group(1).strip()
+                # Split by comma and strip whitespace
+                file_ids = [fid.strip() for fid in file_ids_str.split(",")]
+
+                # Find all matching files
+                matched_files: list[File] = []
+                for file_id in file_ids:
+                    for file in self.files:
+                        if hasattr(file, "related_id") and str(file.related_id) == file_id:
+                            matched_files.append(file)
+                            break
+
+                # Return list of files if any were found, otherwise return original
+                return matched_files or data
+
+            return data
+        else:
+            # Return other types as-is
+            return data

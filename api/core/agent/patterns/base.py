@@ -27,6 +27,7 @@ class AgentPattern(ABC):
         context: ExecutionContext,
         max_iterations: int = 10,
         workflow_call_depth: int = 0,
+        files: list[File] = [],
     ):
         """Initialize the agent strategy."""
         self.model_instance = model_instance
@@ -34,7 +35,7 @@ class AgentPattern(ABC):
         self.context = context
         self.max_iterations = min(max_iterations, 99)  # Cap at 99 iterations
         self.workflow_call_depth = workflow_call_depth
-        self.files: list[File] = []  # Files to be added to next model prompt
+        self.files: list[File] = files
 
     @abstractmethod
     def run(
@@ -100,39 +101,6 @@ class AgentPattern(ABC):
                     tool_calls.append((tool_call.id or "", tool_call.function.name, args))
         return tool_calls
 
-    def _prepare_messages_with_files(self, messages: list[PromptMessage]) -> list[PromptMessage]:
-        """Prepare messages with any files marked for model viewing."""
-        if not self.files:
-            return messages
-
-        # Make a copy of messages to avoid modifying the original
-        messages_copy = messages.copy()
-
-        # Find the last user message and append files
-        last_user_idx = -1
-        for i in range(len(messages_copy) - 1, -1, -1):
-            from core.model_runtime.entities import UserPromptMessage
-
-            if isinstance(messages_copy[i], UserPromptMessage):
-                last_user_idx = i
-                break
-
-        if last_user_idx == -1:
-            # No user message found, create one with files
-            from core.model_runtime.entities import UserPromptMessage
-
-            messages_copy.append(self._create_user_message_with_files("", self.files))
-        else:
-            # Replace the user message with one that includes files
-            user_msg = messages_copy[last_user_idx]
-            text_content = self._extract_text_from_message(user_msg)
-            messages_copy[last_user_idx] = self._create_user_message_with_files(text_content, self.files)
-
-        # Clear the files after loading
-        self.files = []
-
-        return messages_copy
-
     def _extract_text_from_message(self, message: PromptMessage) -> str:
         """Extract text content from a prompt message."""
         if hasattr(message, "content"):
@@ -147,41 +115,6 @@ class AgentPattern(ABC):
                         text_parts.append(item.data)
                 return " ".join(text_parts)
         return ""
-
-    def _create_user_message_with_files(self, text: str, files: list[File]) -> PromptMessage:
-        """Create a user message with files attached."""
-        from core.file import FileType
-        from core.model_runtime.entities import UserPromptMessage
-        from core.model_runtime.entities.message_entities import (
-            ImagePromptMessageContent,
-            PromptMessageContentUnionTypes,
-            TextPromptMessageContent,
-        )
-
-        content: list[PromptMessageContentUnionTypes] = []
-        if text:
-            content.append(TextPromptMessageContent(data=text))
-
-        for file in files:
-            if file.type == FileType.IMAGE:
-                # Add image file
-                image_url = file.generate_url() if hasattr(file, "generate_url") else ""
-                if image_url:
-                    content.append(
-                        ImagePromptMessageContent(
-                            url=image_url,
-                            format="url",
-                            mime_type=file.mime_type or "image/png",
-                            detail=ImagePromptMessageContent.DETAIL.LOW,
-                        )
-                    )
-            else:
-                # Add text representation of other file types
-                file_info = f"\n[File: {file.filename} (Type: {file.type.value if file.type else 'unknown'})]\n"
-                # TODO: Add actual file content reading here
-                content.append(TextPromptMessageContent(data=file_info))
-
-        return UserPromptMessage(content=content)
 
     def _create_log(
         self,

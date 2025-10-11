@@ -175,6 +175,16 @@ class Tool(ABC):
                 ToolParameter.ToolParameterType.FILE,
                 ToolParameter.ToolParameterType.FILES,
             }:
+                # Determine the description based on parameter type
+                if parameter.type == ToolParameter.ToolParameterType.FILE:
+                    file_format_desc = " Input the file id with format: [File: file_id]."
+                else:
+                    file_format_desc = "Input the file id with format: [Files: file_id1, file_id2, ...]. "
+
+                message_tool.parameters["properties"][parameter.name] = {
+                    "type": "string",
+                    "description": (parameter.llm_description or "") + file_format_desc,
+                }
                 continue
             enum = []
             if parameter.type == ToolParameter.ToolParameterType.SELECT:

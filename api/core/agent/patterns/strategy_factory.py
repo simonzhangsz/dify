@@ -1,6 +1,7 @@
 """Strategy factory for creating agent strategies."""
 
 from core.agent.entities import ExecutionContext
+from core.file.models import File
 from core.model_manager import ModelInstance
 from core.model_runtime.entities.model_entities import ModelFeature
 from core.tools.__base.tool import Tool
@@ -22,6 +23,7 @@ class StrategyFactory:
         model_instance: ModelInstance,
         context: ExecutionContext,
         tools: list[Tool],
+        files: list[File],
         max_iterations: int = 10,
         workflow_call_depth: int = 0,
     ) -> AgentPattern:
@@ -33,7 +35,7 @@ class StrategyFactory:
             model_instance: Model instance to use
             context: Execution context containing trace/audit information
             tools: Available tools
-            memory: Conversation memory
+            files: Available files
             max_iterations: Maximum iterations for the strategy
             workflow_call_depth: Depth of workflow calls
 
@@ -46,6 +48,7 @@ class StrategyFactory:
                 model_instance=model_instance,
                 context=context,
                 tools=tools,
+                files=files,
                 max_iterations=max_iterations,
                 workflow_call_depth=workflow_call_depth,
             )
@@ -55,6 +58,7 @@ class StrategyFactory:
                 model_instance=model_instance,
                 context=context,
                 tools=tools,
+                files=files,
                 max_iterations=max_iterations,
                 workflow_call_depth=workflow_call_depth,
             )

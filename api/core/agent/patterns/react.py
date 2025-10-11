@@ -1,6 +1,7 @@
 """ReAct strategy implementation."""
 
 import json
+import re
 from collections.abc import Generator
 from typing import Any
 
@@ -92,7 +93,7 @@ class ReActStrategy(AgentPattern):
             )
 
             # Parse output
-            usage_dict = {}
+            usage_dict: dict[str, Any] = {}
             react_chunks = CotAgentOutputParser.handle_react_stream_output(chunks, usage_dict)
 
             # Initialize scratchpad unit
@@ -269,7 +270,7 @@ class ReActStrategy(AgentPattern):
     ) -> Generator[AgentLog, None, str]:
         """Handle tool call and return observation."""
         tool_name = action.action_name
-        tool_args = action.action_input
+        tool_args: dict[str, Any] | str = action.action_input
 
         # Start tool log
         tool_log = self._create_log(
@@ -312,21 +313,8 @@ class ReActStrategy(AgentPattern):
         elif not isinstance(tool_args, dict):
             tool_args = {"input": str(tool_args)}
 
-        # Inject files from tool_file_map if available
-        # Find the file dispatcher tool and get its tool_file_map
-        from core.agent.tools.file_dispatcher import FileDispatcherTool
-
-        tool_file_map = None
-        for tool in self.tools:
-            if isinstance(tool, FileDispatcherTool):
-                tool_file_map = tool.tool_file_map
-                break
-
-        if tool_file_map and tool_name in tool_file_map:
-            file_params = tool_file_map[tool_name]
-            for param_name, file in file_params.items():
-                if param_name not in tool_args:
-                    tool_args[param_name] = file
+        # Process tool_args to replace file references with actual File objects
+        tool_args = self._replace_file_references(tool_args)
 
         # Invoke tool
         tool_response = ToolEngine().generic_invoke(
@@ -364,7 +352,7 @@ class ReActStrategy(AgentPattern):
                                 tool_files.append(file)
 
         # Track files produced by this tool
-        files.extend(tool_files)
+        self.files.extend(tool_files)
 
         # Finish tool log
         yield self._finish_log(
@@ -377,3 +365,74 @@ class ReActStrategy(AgentPattern):
         )
 
         return response_content or "Tool executed successfully"
+
+    def _replace_file_references(self, tool_args: dict[str, Any]) -> dict[str, Any]:
+        """
+        Replace file references in tool arguments with actual File objects.
+
+        Args:
+            tool_args: Dictionary of tool arguments
+
+        Returns:
+            Updated tool arguments with file references replaced
+        """
+        # Process each argument in the dictionary
+        processed_args = {}
+        for key, value in tool_args.items():
+            processed_args[key] = self._process_file_reference(value)
+        return processed_args
+
+    def _process_file_reference(self, data: Any) -> Any:
+        """
+        Recursively process data to replace file references.
+        Supports both single file [File: file_id] and multiple files [Files: file_id1, file_id2, ...].
+
+        Args:
+            data: The data to process (can be dict, list, str, or other types)
+
+        Returns:
+            Processed data with file references replaced
+        """
+        single_file_pattern = re.compile(r"^\[File:\s*([^\]]+)\]$")
+        multiple_files_pattern = re.compile(r"^\[Files:\s*([^\]]+)\]$")
+
+        if isinstance(data, dict):
+            # Process dictionary recursively
+            return {key: self._process_file_reference(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            # Process list recursively
+            return [self._process_file_reference(item) for item in data]
+        elif isinstance(data, str):
+            # Check for single file pattern [File: file_id]
+            single_match = single_file_pattern.match(data.strip())
+            if single_match:
+                file_id = single_match.group(1).strip()
+                # Find the file in self.files
+                for file in self.files:
+                    if hasattr(file, "id") and str(file.id) == file_id:
+                        return file
+                # If file not found, return original value
+                return data
+
+            # Check for multiple files pattern [Files: file_id1, file_id2, ...]
+            multiple_match = multiple_files_pattern.match(data.strip())
+            if multiple_match:
+                file_ids_str = multiple_match.group(1).strip()
+                # Split by comma and strip whitespace
+                file_ids = [fid.strip() for fid in file_ids_str.split(",")]
+
+                # Find all matching files
+                matched_files = []
+                for file_id in file_ids:
+                    for file in self.files:
+                        if hasattr(file, "id") and str(file.id) == file_id:
+                            matched_files.append(file)
+                            break
+
+                # Return list of files if any were found, otherwise return original
+                return matched_files or data
+
+            return data
+        else:
+            # Return other types as-is
+            return data
