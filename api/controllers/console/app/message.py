@@ -71,6 +71,7 @@ class ChatMessageListApi(Resource):
         )
         args = parser.parse_args()
 
+        # TODO(core-refactor): refactor to use MessageRepository for message pagination instead of raw queries.
         conversation = (
             db.session.query(Conversation)
             .where(Conversation.id == args["conversation_id"], Conversation.app_id == app_model.id)
@@ -272,8 +273,10 @@ class MessageSuggestedQuestionApi(Resource):
         current_user, _ = current_account_with_tenant()
         message_id = str(message_id)
 
+        message_service = MessageService.create()
+
         try:
-            questions = MessageService.get_suggested_questions_after_answer(
+            questions = message_service.get_suggested_questions_after_answer(
                 app_model=app_model, message_id=message_id, user=current_user, invoke_from=InvokeFrom.DEBUGGER
             )
         except MessageNotExistsError:

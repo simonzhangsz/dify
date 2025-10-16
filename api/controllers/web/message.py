@@ -101,8 +101,10 @@ class MessageListApi(WebApiResource):
         )
         args = parser.parse_args()
 
+        message_service = MessageService.create()
+
         try:
-            return MessageService.pagination_by_first_id(
+            return message_service.pagination_by_first_id(
                 app_model, end_user, args["conversation_id"], args["first_id"], args["limit"]
             )
         except ConversationNotExistsError:
@@ -152,8 +154,10 @@ class MessageFeedbackApi(WebApiResource):
         )
         args = parser.parse_args()
 
+        message_service = MessageService.create()
+
         try:
-            MessageService.create_feedback(
+            message_service.create_feedback(
                 app_model=app_model,
                 message_id=message_id,
                 user=end_user,
@@ -260,8 +264,10 @@ class MessageSuggestedQuestionApi(WebApiResource):
 
         message_id = str(message_id)
 
+        message_service = MessageService.create()
+
         try:
-            questions = MessageService.get_suggested_questions_after_answer(
+            questions = message_service.get_suggested_questions_after_answer(
                 app_model=app_model, user=end_user, message_id=message_id, invoke_from=InvokeFrom.WEB_APP
             )
             # questions is a list of strings, not a list of Message objects
