@@ -112,7 +112,7 @@ class LLMNode(Node):
 
     # Instance attributes specific to LLMNode.
     # Output variable for file
-    # _file_outputs: list["File"]  # Declared in __init__ instead
+    _file_outputs: list["File"]
 
     _llm_file_saver: LLMFileSaver
 
@@ -132,7 +132,7 @@ class LLMNode(Node):
             graph_runtime_state=graph_runtime_state,
         )
         # LLM file outputs, used for MultiModal outputs.
-        self._file_outputs: list[File] = []
+        self._file_outputs = []
 
         if llm_file_saver is None:
             llm_file_saver = FileSaverImpl(
