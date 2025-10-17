@@ -1,7 +1,6 @@
 """Function Call strategy implementation."""
 
 import json
-import re
 from collections.abc import Generator
 from typing import Any, Union
 
@@ -12,14 +11,11 @@ from core.model_runtime.entities import (
     LLMResult,
     LLMResultChunk,
     LLMResultChunkDelta,
+    LLMUsage,
     PromptMessage,
     PromptMessageTool,
     ToolPromptMessage,
 )
-from core.tools.__base.tool import Tool
-from core.tools.entities.tool_entities import ToolInvokeMessage
-from core.tools.tool_engine import DifyWorkflowCallbackHandler, ToolEngine
-from core.workflow.nodes.llm.node import LLMUsage
 
 from .base import AgentPattern
 
@@ -188,13 +184,6 @@ class FunctionCallStrategy(AgentPattern):
         )
         return tool_calls, response_content, finish_reason
 
-    def _convert_tools_to_prompt_format(self) -> list[PromptMessageTool]:
-        """Convert tools to prompt message format."""
-        prompt_tools: list[PromptMessageTool] = []
-        for tool in self.tools:
-            prompt_tools.append(tool.to_prompt_message_tool())
-        return prompt_tools
-
     def _create_assistant_message(
         self, content: str, tool_calls: list[tuple[str, str, dict[str, Any]]] | None = None
     ) -> AssistantPromptMessage:
@@ -223,22 +212,11 @@ class FunctionCallStrategy(AgentPattern):
     ) -> Generator[AgentLog, None, tuple[str, list[File]]]:
         """Handle a single tool call and return response with files."""
         # Find tool
-        tool_instance: Tool | None = None
-        for tool in self.tools:
-            if tool.entity.identity.name == tool_name:
-                tool_instance = tool
-                break
-
+        tool_instance = self._find_tool_by_name(tool_name)
         if not tool_instance:
             raise ValueError(f"Tool {tool_name} not found")
 
-        # Inject files from tool_file_map if available
-        # Process tool_args to replace file references with actual File objects
-        tool_args = self._replace_file_references(tool_args)
-
-        # Invoke tool
-
-        # Use invoke method instead of generic_invoke for agent usage
+        # Create tool call log
         tool_call_log = self._create_log(
             label=f"CALL {tool_name}",
             status=AgentLog.LogStatus.START,
@@ -251,38 +229,9 @@ class FunctionCallStrategy(AgentPattern):
             parent_id=round_log.id,
         )
         yield tool_call_log
-        tool_response: Generator[ToolInvokeMessage, None, None] = ToolEngine().generic_invoke(
-            tool=tool_instance,
-            tool_parameters=tool_args,
-            user_id=self.context.user_id or "",
-            workflow_tool_callback=DifyWorkflowCallbackHandler(),
-            workflow_call_depth=self.workflow_call_depth,
-            app_id=self.context.app_id,
-            conversation_id=self.context.conversation_id,
-            message_id=self.context.message_id,
-        )
 
-        # Collect response and files
-        response_content: str = ""
-        tool_files: list[File] = []
-
-        for response in tool_response:
-            if response.type == ToolInvokeMessage.MessageType.TEXT:
-                assert isinstance(response.message, ToolInvokeMessage.TextMessage)
-                response_content += response.message.text
-            elif response.type == ToolInvokeMessage.MessageType.FILE:
-                # Extract file from meta
-                if response.meta and "file" in response.meta:
-                    file = response.meta["file"]
-                    if isinstance(file, File):
-                        # Check if file is for model or tool output
-                        if response.meta.get("target") == "self":
-                            # File is for model - add to files for next prompt
-                            self.files.append(file)
-                            response_content += f"File '{file.filename}' has been loaded into your context."
-                        else:
-                            # File is tool output
-                            tool_files.append(file)
+        # Invoke tool using base class method
+        response_content, tool_files = self._invoke_tool(tool_instance, tool_args, tool_name)
 
         yield self._finish_log(
             tool_call_log,
@@ -302,74 +251,3 @@ class FunctionCallStrategy(AgentPattern):
             )
         )
         return response_content, tool_files
-
-    def _replace_file_references(self, tool_args: dict[str, Any]) -> dict[str, Any]:
-        """
-        Replace file references in tool arguments with actual File objects.
-
-        Args:
-            tool_args: Dictionary of tool arguments
-
-        Returns:
-            Updated tool arguments with file references replaced
-        """
-        # Process each argument in the dictionary
-        processed_args: dict[str, Any] = {}
-        for key, value in tool_args.items():
-            processed_args[key] = self._process_file_reference(value)
-        return processed_args
-
-    def _process_file_reference(self, data: Any) -> Any:
-        """
-        Recursively process data to replace file references.
-        Supports both single file [File: file_id] and multiple files [Files: file_id1, file_id2, ...].
-
-        Args:
-            data: The data to process (can be dict, list, str, or other types)
-
-        Returns:
-            Processed data with file references replaced
-        """
-        single_file_pattern = re.compile(r"^\[File:\s*([^\]]+)\]$")
-        multiple_files_pattern = re.compile(r"^\[Files:\s*([^\]]+)\]$")
-
-        if isinstance(data, dict):
-            # Process dictionary recursively
-            return {key: self._process_file_reference(value) for key, value in data.items()}
-        elif isinstance(data, list):
-            # Process list recursively
-            return [self._process_file_reference(item) for item in data]
-        elif isinstance(data, str):
-            # Check for single file pattern [File: file_id]
-            single_match = single_file_pattern.match(data.strip())
-            if single_match:
-                file_id = single_match.group(1).strip()
-                # Find the file in self.files
-                for file in self.files:
-                    if hasattr(file, "id") and str(file.id) == file_id:
-                        return file
-                # If file not found, return original value
-                return data
-
-            # Check for multiple files pattern [Files: file_id1, file_id2, ...]
-            multiple_match = multiple_files_pattern.match(data.strip())
-            if multiple_match:
-                file_ids_str = multiple_match.group(1).strip()
-                # Split by comma and strip whitespace
-                file_ids = [fid.strip() for fid in file_ids_str.split(",")]
-
-                # Find all matching files
-                matched_files: list[File] = []
-                for file_id in file_ids:
-                    for file in self.files:
-                        if hasattr(file, "related_id") and str(file.related_id) == file_id:
-                            matched_files.append(file)
-                            break
-
-                # Return list of files if any were found, otherwise return original
-                return matched_files or data
-
-            return data
-        else:
-            # Return other types as-is
-            return data

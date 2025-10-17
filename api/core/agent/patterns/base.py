@@ -1,6 +1,7 @@
 """Base class for agent strategies."""
 
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
@@ -12,9 +13,19 @@ if TYPE_CHECKING:
 from core.agent.entities import AgentLog, AgentResult, ExecutionContext
 from core.file import File
 from core.model_manager import ModelInstance
-from core.model_runtime.entities import LLMResult, LLMResultChunk, PromptMessage
+from core.model_runtime.entities import (
+    AssistantPromptMessage,
+    LLMResult,
+    LLMResultChunk,
+    LLMResultChunkDelta,
+    PromptMessage,
+    PromptMessageTool,
+)
 from core.model_runtime.entities.llm_entities import LLMUsage
+from core.model_runtime.entities.message_entities import TextPromptMessageContent
 from core.tools.__base.tool import Tool
+from core.tools.entities.tool_entities import ToolInvokeMessage
+from core.tools.tool_engine import DifyWorkflowCallbackHandler, ToolEngine
 
 
 class AgentPattern(ABC):
@@ -64,16 +75,24 @@ class AgentPattern(ABC):
     def _extract_content(self, content: Any) -> str:
         """Extract text content from message content."""
         if isinstance(content, list):
-            return "".join(c.data for c in content if hasattr(c, "data"))
+            # Content items are PromptMessageContentUnionTypes
+            text_parts = []
+            for c in content:
+                # Check if it's a TextPromptMessageContent (which has data attribute)
+                if isinstance(c, TextPromptMessageContent):
+                    text_parts.append(c.data)
+            return "".join(text_parts)
         return str(content)
 
     def _has_tool_calls(self, chunk: LLMResultChunk) -> bool:
         """Check if chunk contains tool calls."""
-        return bool(hasattr(chunk, "delta") and chunk.delta.message and chunk.delta.message.tool_calls)
+        # LLMResultChunk always has delta attribute
+        return bool(chunk.delta.message and chunk.delta.message.tool_calls)
 
     def _has_tool_calls_result(self, result: LLMResult) -> bool:
         """Check if result contains tool calls (non-streaming)."""
-        return bool(hasattr(result, "message") and result.message and result.message.tool_calls)
+        # LLMResult always has message attribute
+        return bool(result.message and result.message.tool_calls)
 
     def _extract_tool_calls(self, chunk: LLMResultChunk) -> list[tuple[str, str, dict[str, Any]]]:
         """Extract tool calls from streaming chunk."""
@@ -103,17 +122,17 @@ class AgentPattern(ABC):
 
     def _extract_text_from_message(self, message: PromptMessage) -> str:
         """Extract text content from a prompt message."""
-        if hasattr(message, "content"):
-            content = message.content
-            if isinstance(content, str):
-                return content
-            elif isinstance(content, list):
-                # Extract text from content list
-                text_parts = []
-                for item in content:
-                    if hasattr(item, "data") and hasattr(item, "type") and item.type == "text":
-                        text_parts.append(item.data)
-                return " ".join(text_parts)
+        # PromptMessage always has content attribute
+        content = message.content
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # Extract text from content list
+            text_parts = []
+            for item in content:
+                if isinstance(item, TextPromptMessageContent):
+                    text_parts.append(item.data)
+            return " ".join(text_parts)
         return ""
 
     def _create_log(
@@ -173,3 +192,220 @@ class AgentPattern(ABC):
             )
 
         return log
+
+    def _replace_file_references(self, tool_args: dict[str, Any]) -> dict[str, Any]:
+        """
+        Replace file references in tool arguments with actual File objects.
+
+        Args:
+            tool_args: Dictionary of tool arguments
+
+        Returns:
+            Updated tool arguments with file references replaced
+        """
+        # Process each argument in the dictionary
+        processed_args: dict[str, Any] = {}
+        for key, value in tool_args.items():
+            processed_args[key] = self._process_file_reference(value)
+        return processed_args
+
+    def _process_file_reference(self, data: Any) -> Any:
+        """
+        Recursively process data to replace file references.
+        Supports both single file [File: file_id] and multiple files [Files: file_id1, file_id2, ...].
+
+        Args:
+            data: The data to process (can be dict, list, str, or other types)
+
+        Returns:
+            Processed data with file references replaced
+        """
+        single_file_pattern = re.compile(r"^\[File:\s*([^\]]+)\]$")
+        multiple_files_pattern = re.compile(r"^\[Files:\s*([^\]]+)\]$")
+
+        if isinstance(data, dict):
+            # Process dictionary recursively
+            return {key: self._process_file_reference(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            # Process list recursively
+            return [self._process_file_reference(item) for item in data]
+        elif isinstance(data, str):
+            # Check for single file pattern [File: file_id]
+            single_match = single_file_pattern.match(data.strip())
+            if single_match:
+                file_id = single_match.group(1).strip()
+                # Find the file in self.files
+                for file in self.files:
+                    if file.id and str(file.id) == file_id:
+                        return file
+                # If file not found, return original value
+                return data
+
+            # Check for multiple files pattern [Files: file_id1, file_id2, ...]
+            multiple_match = multiple_files_pattern.match(data.strip())
+            if multiple_match:
+                file_ids_str = multiple_match.group(1).strip()
+                # Split by comma and strip whitespace
+                file_ids = [fid.strip() for fid in file_ids_str.split(",")]
+
+                # Find all matching files
+                matched_files: list[File] = []
+                for file_id in file_ids:
+                    for file in self.files:
+                        if file.id and str(file.id) == file_id:
+                            matched_files.append(file)
+                            break
+
+                # Return list of files if any were found, otherwise return original
+                return matched_files or data
+
+            return data
+        else:
+            # Return other types as-is
+            return data
+
+    def _create_text_chunk(self, text: str, prompt_messages: list[PromptMessage]) -> LLMResultChunk:
+        """Create a text chunk for streaming."""
+        return LLMResultChunk(
+            model=self.model_instance.model,
+            prompt_messages=prompt_messages,
+            delta=LLMResultChunkDelta(
+                index=0,
+                message=AssistantPromptMessage(content=text),
+                usage=None,
+            ),
+            system_fingerprint="",
+        )
+
+    def _invoke_tool(
+        self,
+        tool_instance: Tool,
+        tool_args: dict[str, Any],
+        tool_name: str,
+    ) -> tuple[str, list[File]]:
+        """
+        Invoke a tool and collect its response.
+
+        Args:
+            tool_instance: The tool instance to invoke
+            tool_args: Tool arguments
+            tool_name: Name of the tool
+
+        Returns:
+            Tuple of (response_content, tool_files)
+        """
+        # Process tool_args to replace file references with actual File objects
+        tool_args = self._replace_file_references(tool_args)
+
+        # Invoke tool
+        tool_response = ToolEngine().generic_invoke(
+            tool=tool_instance,
+            tool_parameters=tool_args,
+            user_id=self.context.user_id or "",
+            workflow_tool_callback=DifyWorkflowCallbackHandler(),
+            workflow_call_depth=self.workflow_call_depth,
+            app_id=self.context.app_id,
+            conversation_id=self.context.conversation_id,
+            message_id=self.context.message_id,
+        )
+
+        # Collect response and files
+        response_content = ""
+        tool_files: list[File] = []
+
+        for response in tool_response:
+            if response.type == ToolInvokeMessage.MessageType.TEXT:
+                assert isinstance(response.message, ToolInvokeMessage.TextMessage)
+                response_content += response.message.text
+
+            elif response.type == ToolInvokeMessage.MessageType.LINK:
+                # Handle link messages
+                if isinstance(response.message, ToolInvokeMessage.TextMessage):
+                    response_content += f"[Link: {response.message.text}]"
+
+            elif response.type == ToolInvokeMessage.MessageType.IMAGE:
+                # Handle image URL messages
+                if isinstance(response.message, ToolInvokeMessage.TextMessage):
+                    response_content += f"[Image: {response.message.text}]"
+
+            elif response.type == ToolInvokeMessage.MessageType.IMAGE_LINK:
+                # Handle image link messages
+                if isinstance(response.message, ToolInvokeMessage.TextMessage):
+                    response_content += f"[Image: {response.message.text}]"
+
+            elif response.type == ToolInvokeMessage.MessageType.BINARY_LINK:
+                # Handle binary file link messages
+                if isinstance(response.message, ToolInvokeMessage.TextMessage):
+                    filename = response.meta.get("filename", "file") if response.meta else "file"
+                    response_content += f"[File: {filename} - {response.message.text}]"
+
+            elif response.type == ToolInvokeMessage.MessageType.JSON:
+                # Handle JSON messages
+                if isinstance(response.message, ToolInvokeMessage.JsonMessage):
+                    response_content += json.dumps(response.message.json_object, ensure_ascii=False, indent=2)
+
+            elif response.type == ToolInvokeMessage.MessageType.BLOB:
+                # Handle blob messages - convert to text representation
+                if isinstance(response.message, ToolInvokeMessage.BlobMessage):
+                    mime_type = (
+                        response.meta.get("mime_type", "application/octet-stream")
+                        if response.meta
+                        else "application/octet-stream"
+                    )
+                    size = len(response.message.blob)
+                    response_content += f"[Binary data: {mime_type}, size: {size} bytes]"
+
+            elif response.type == ToolInvokeMessage.MessageType.VARIABLE:
+                # Handle variable messages
+                if isinstance(response.message, ToolInvokeMessage.VariableMessage):
+                    var_name = response.message.variable_name
+                    var_value = response.message.variable_value
+                    if isinstance(var_value, str):
+                        response_content += var_value
+                    else:
+                        response_content += f"[Variable {var_name}: {json.dumps(var_value, ensure_ascii=False)}]"
+
+            elif response.type == ToolInvokeMessage.MessageType.BLOB_CHUNK:
+                # Handle blob chunk messages - these are parts of a larger blob
+                if isinstance(response.message, ToolInvokeMessage.BlobChunkMessage):
+                    response_content += f"[Blob chunk {response.message.sequence}: {len(response.message.blob)} bytes]"
+
+            elif response.type == ToolInvokeMessage.MessageType.RETRIEVER_RESOURCES:
+                # Handle retriever resources messages
+                if isinstance(response.message, ToolInvokeMessage.RetrieverResourceMessage):
+                    response_content += response.message.context
+
+            elif response.type == ToolInvokeMessage.MessageType.FILE:
+                # Extract file from meta
+                if response.meta and "file" in response.meta:
+                    file = response.meta["file"]
+                    if isinstance(file, File):
+                        # Check if file is for model or tool output
+                        if response.meta.get("target") == "self":
+                            # File is for model - add to files for next prompt
+                            self.files.append(file)
+                            response_content += f"File '{file.filename}' has been loaded into your context."
+                        else:
+                            # File is tool output
+                            tool_files.append(file)
+
+        return response_content, tool_files
+
+    def _find_tool_by_name(self, tool_name: str) -> Tool | None:
+        """Find a tool instance by its name."""
+        for tool in self.tools:
+            if tool.entity.identity.name == tool_name:
+                return tool
+        return None
+
+    def _convert_tools_to_prompt_format(self) -> list[PromptMessageTool]:
+        """Convert tools to prompt message format."""
+        prompt_tools: list[PromptMessageTool] = []
+        for tool in self.tools:
+            prompt_tools.append(tool.to_prompt_message_tool())
+        return prompt_tools
+
+    def _update_usage_with_empty(self, llm_usage: dict[str, Any]) -> None:
+        """Initialize usage tracking with empty usage if not set."""
+        if "usage" not in llm_usage or llm_usage["usage"] is None:
+            llm_usage["usage"] = LLMUsage.empty_usage()
