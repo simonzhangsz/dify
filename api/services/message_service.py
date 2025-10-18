@@ -1,7 +1,8 @@
 import json
+from collections.abc import Sequence
 from typing import Union
 
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from core.app.apps.advanced_chat.app_config_manager import AdvancedChatAppConfigManager
 from core.app.entities.app_invoke_entities import InvokeFrom
@@ -24,12 +25,20 @@ from services.workflow_service import WorkflowService
 
 
 class MessageService:
+    _session_maker: sessionmaker[Session] | None = None
+
     def __init__(self, message_repository: MessageRepository):
         self._message_repository = message_repository
 
     @classmethod
+    def _get_session_maker(cls) -> sessionmaker[Session]:
+        if cls._session_maker is None:
+            cls._session_maker = sessionmaker(bind=db.engine, expire_on_commit=False)
+        return cls._session_maker
+
+    @classmethod
     def create(cls) -> "MessageService":
-        session_maker = sessionmaker(bind=db.engine, expire_on_commit=False)
+        session_maker = cls._get_session_maker()
         repository = DifyAPIRepositoryFactory.create_api_message_repository(session_maker)
         return cls(repository)
 
@@ -70,7 +79,7 @@ class MessageService:
         last_id: str | None,
         limit: int,
         conversation_id: str | None = None,
-        include_ids: list | None = None,
+        include_ids: Sequence[str] | None = None,
     ) -> InfiniteScrollPagination:
         if not user:
             return InfiniteScrollPagination(data=[], limit=limit, has_more=False)

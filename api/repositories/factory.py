@@ -5,7 +5,7 @@ This factory is specifically designed for DifyAPI repositories that handle
 service-layer operations with dependency injection patterns.
 """
 
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from configs import dify_config
 from core.message.repositories.message_repository import MessageRepository
@@ -83,7 +83,7 @@ class DifyAPIRepositoryFactory(DifyCoreRepositoryFactory):
             raise RepositoryImportError(f"Failed to create APIWorkflowRunRepository from '{class_path}': {e}") from e
 
     @classmethod
-    def create_api_message_repository(cls, session_maker: sessionmaker) -> MessageRepository:
+    def create_api_message_repository(cls, session_maker: sessionmaker[Session]) -> MessageRepository:
         """
         Create a MessageRepository instance based on configuration.
 
