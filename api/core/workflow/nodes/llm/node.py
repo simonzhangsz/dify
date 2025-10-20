@@ -189,6 +189,9 @@ class LLMNode(Node):
             # merge inputs
             inputs.update(jinja_inputs)
 
+            # Add all inputs to node_inputs for logging
+            node_inputs.update(inputs)
+
             # fetch files
             files = (
                 llm_utils.fetch_files(
@@ -257,6 +260,8 @@ class LLMNode(Node):
                     stop=stop,
                     files=files,
                     variable_pool=variable_pool,
+                    node_inputs=node_inputs,
+                    process_data=process_data,
                 )
             else:
                 # Use traditional LLM invocation
@@ -338,6 +343,12 @@ class LLMNode(Node):
                 is_final=True,
             )
 
+            # Add tools to inputs if configured
+            if self._node_data.tools:
+                node_inputs["tools"] = [
+                    {"provider_id": tool.provider_name, "tool_name": tool.tool_name} for tool in self._node_data.tools
+                ]
+
             yield StreamCompletedEvent(
                 node_run_result=NodeRunResult(
                     status=WorkflowNodeExecutionStatus.SUCCEEDED,
@@ -353,6 +364,11 @@ class LLMNode(Node):
                 )
             )
         except ValueError as e:
+            # Add tools to inputs if configured
+            if self._node_data.tools:
+                node_inputs["tools"] = [
+                    {"provider_id": tool.provider_name, "tool_name": tool.tool_name} for tool in self._node_data.tools
+                ]
             yield StreamCompletedEvent(
                 node_run_result=NodeRunResult(
                     status=WorkflowNodeExecutionStatus.FAILED,
@@ -364,6 +380,11 @@ class LLMNode(Node):
             )
         except Exception as e:
             logger.exception("error while executing llm node")
+            # Add tools to inputs if configured
+            if self._node_data.tools:
+                node_inputs["tools"] = [
+                    {"provider_id": tool.provider_name, "tool_name": tool.tool_name} for tool in self._node_data.tools
+                ]
             yield StreamCompletedEvent(
                 node_run_result=NodeRunResult(
                     status=WorkflowNodeExecutionStatus.FAILED,
@@ -1205,6 +1226,8 @@ class LLMNode(Node):
         stop: Sequence[str] | None,
         files: Sequence["File"],
         variable_pool: VariablePool,
+        node_inputs: dict[str, Any],
+        process_data: dict[str, Any],
     ) -> Generator[NodeEventBase, None, None]:
         """Invoke LLM with tools support (from Agent V2)."""
         # Get model features to determine strategy
@@ -1235,7 +1258,7 @@ class LLMNode(Node):
         )
 
         # Process outputs
-        yield from self._process_tool_outputs(outputs, strategy)
+        yield from self._process_tool_outputs(outputs, strategy, node_inputs, process_data)
 
     def _get_model_features(self, model_instance: ModelInstance) -> list[ModelFeature]:
         """Get model schema to determine features."""
@@ -1327,7 +1350,11 @@ class LLMNode(Node):
         return files
 
     def _process_tool_outputs(
-        self, outputs: Generator[LLMResultChunk | AgentLog, None, AgentResult], strategy: Any
+        self,
+        outputs: Generator[LLMResultChunk | AgentLog, None, AgentResult],
+        strategy: Any,
+        node_inputs: dict[str, Any],
+        process_data: dict[str, Any],
     ) -> Generator[NodeEventBase, None, None]:
         """Process strategy outputs and convert to node events."""
         text = ""
@@ -1423,16 +1450,16 @@ class LLMNode(Node):
                 metadata={
                     WorkflowNodeExecutionMetadataKey.AGENT_LOG: agent_logs,
                 },
-                inputs=(
-                    {
-                        "tools": [
-                            {"provider_id": tool.provider_name, "tool_name": tool.tool_name}
-                            for tool in self._node_data.tools
-                        ]
-                    }
+                inputs={
+                    **node_inputs,
+                    "tools": [
+                        {"provider_id": tool.provider_name, "tool_name": tool.tool_name}
+                        for tool in self._node_data.tools
+                    ]
                     if self._node_data.tools
-                    else {}
-                ),
+                    else [],
+                },
+                process_data=process_data,
                 llm_usage=usage,
             )
         )

@@ -1,5 +1,5 @@
 import type { CommonNodeType, Memory, ModelConfig, PromptItem, ValueSelector, Variable, VisionSetting } from '@/app/components/workflow/types'
-import type { ToolWithProvider } from '@/app/components/workflow/types'
+import type { ToolValue } from '@/app/components/workflow/block-selector/types'
 
 export type LLMNodeType = CommonNodeType & {
   model: ModelConfig
@@ -19,7 +19,7 @@ export type LLMNodeType = CommonNodeType & {
   structured_output_enabled?: boolean
   structured_output?: StructuredOutput
   reasoning_format?: 'tagged' | 'separated'
-  tools?: ToolWithProvider[]
+  tools?: ToolValue[]
 }
 
 export enum Type {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import produce from 'immer'
 import { EditionType, PromptRole, VarType } from '../../types'
-import type { Memory, PromptItem, ToolWithProvider, ValueSelector, Var, Variable } from '../../types'
+import type { Memory, PromptItem, ValueSelector, Var, Variable } from '../../types'
+import type { ToolValue } from '../../block-selector/types'
 import { useStore } from '../../store'
 import {
   useIsChatMode,
@@ -327,7 +328,7 @@ const useConfig = (id: string, payload: LLMNodeType) => {
     setInputs(newInputs)
   }, [inputs, setInputs])
 
-  const handleToolsChange = useCallback((tools: ToolWithProvider[]) => {
+  const handleToolsChange = useCallback((tools: ToolValue[]) => {
     const newInputs = produce(inputs, (draft) => {
       draft.tools = tools
     })

@@ -2,14 +2,15 @@ import type { FC } from 'react'
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import MultipleToolSelector from '@/app/components/plugins/plugin-detail-panel/multiple-tool-selector'
-import type { NodeOutPutVar, ToolWithProvider } from '@/app/components/workflow/types'
+import type { NodeOutPutVar } from '@/app/components/workflow/types'
+import type { ToolValue } from '@/app/components/workflow/block-selector/types'
 import type { Node } from 'reactflow'
 import Field from '@/app/components/workflow/nodes/_base/components/field'
 import { RiHammerLine } from '@remixicon/react'
 
 type Props = {
-  tools?: ToolWithProvider[]
-  onChange: (tools: ToolWithProvider[]) => void
+  tools?: ToolValue[]
+  onChange: (tools: ToolValue[]) => void
   readonly?: boolean
   nodeId?: string
   availableVars?: NodeOutPutVar[]
