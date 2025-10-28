@@ -235,3 +235,7 @@ scripts/stress-test/reports/
 # mcp
 .playwright-mcp/
 .serena/
+
+# node_modules
+node_modules/
+web/node_modules/
