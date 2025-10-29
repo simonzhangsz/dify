@@ -239,3 +239,7 @@ scripts/stress-test/reports/
 # node_modules
 node_modules/
 web/node_modules/
+package-lock.json
+package.json
+pnpm-lock.yaml
+yarn.lock
