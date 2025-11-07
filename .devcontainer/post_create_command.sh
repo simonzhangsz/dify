@@ -1,6 +1,9 @@
 #!/bin/bash
 WORKSPACE_ROOT=$(pwd)
 
+# Fix permissions for the workspace to allow vscode user to write
+sudo chown -R vscode:vscode /workspaces/dify.git
+
 corepack enable
 cd web && pnpm install
 pipx install uv
